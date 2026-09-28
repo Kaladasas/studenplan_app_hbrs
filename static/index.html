@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="de">
+
+<head>
+  <meta charset="utf-8">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+
+  <title>H-BRS Stundenplan</title>
+
+  <link
+    rel="stylesheet"
+    href="/static/style.css"
+  >
+</head>
+
+<body>
+
+  <div class="app">
+
+    <header>
+
+      <div>
+
+        <div class="brand">
+          H-BRS Stundenplan
+        </div>
+
+        <div class="sub">
+          Studiengang / Semester auswählen
+        </div>
+
+      </div>
+
+      <div
+        class="status"
+        id="status"
+      >
+        Lade Auswahl …
+      </div>
+
+    </header>
+
+
+    <aside>
+
+      <div class="field">
+
+        <label for="semester">
+          STUDIENGANG / SEMESTER
+        </label>
+
+        <select id="semester">
+          <option>
+            Lade …
+          </option>
+        </select>
+
+        <div id="semesterActions"></div>
+
+      </div>
+
+
+      <div class="subjects">
+
+        <div id="layers"></div>
+
+        <div
+          class="count"
+          id="count"
+        >
+          Noch kein Stundenplan geladen.
+        </div>
+
+        <div id="subjects"></div>
+
+      </div>
+
+    </aside>
+
+
+    <main>
+
+      <div class="toolbar">
+
+        <div class="week-controls">
+
+          <button
+            id="prevWeek"
+            type="button"
+            title="Vorherige Woche"
+          >
+            ←
+          </button>
+
+          <button
+            id="todayWeek"
+            type="button"
+          >
+            Heute
+          </button>
+
+          <button
+            id="nextWeek"
+            type="button"
+            title="Nächste Woche"
+          >
+            →
+          </button>
+
+        </div>
+
+        <div
+            class="week-title"
+            id="weekTitle"
+          >
+            Kalenderwoche –
+        </div>
+
+        <button
+          id="all"
+          type="button"
+        >
+          Alle Fächer
+        </button>
+
+      </div>
+
+
+      <div
+        id="schedule"
+        class="empty"
+      >
+        Bitte einen Studiengang / ein Semester auswählen.
+      </div>
+
+    </main>
+
+  </div>
+
+
+  <script src="/static/script.js"></script>
+
+</body>
+</html>
