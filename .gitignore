@@ -2,3 +2,6 @@
 __pycache__/
 .venv/
 *.json
+build/
+saved/
+data/

@@ -1,26 +1,34 @@
-# H-BRS Stundenplan WebApp
+# H-BRS Stundenplan – Android
 
-Die WebApp ruft die H-BRS-eva-Stundenplanseite serverseitig ab.
+Android-Port der ursprünglichen Flask-WebApp.
 
-## Start
+## Was wurde geändert?
+
+- Die bestehende HTML/CSS/JavaScript-Oberfläche bleibt erhalten.
+- Flask wurde aus der Android-Laufzeit entfernt.
+- Ein kleiner lokaler HTTP-Server in Java stellt `/api/semesters`, `/api/schedule` und `/api/saved` bereit.
+- Die Eva2-Abfrage läuft direkt vom Android-Gerät zu `https://eva2.inf.h-brs.de`.
+- Gespeicherte Stundenpläne und der technische Cache liegen im privaten App-Speicher.
+- Die APK benötigt nur die Internet-Berechtigung.
+
+## APK bauen
+
+### Lokal
+
+Voraussetzungen: JDK 17, Android SDK und Gradle 8.7.
 
 ```bash
-python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# macOS/Linux: source .venv/bin/activate
-# chmod +x start.sh
-pip install -r requirements.txt
-python app.py
+gradle :app:assembleDebug
 ```
 
-Dann `http://localhost:5000` öffnen.
+APK:
 
-## Funktionsweise
+`app/build/outputs/apk/debug/app-debug.apk`
 
-1. `/api/semesters` lädt die Seite `https://eva2.inf.h-brs.de/stundenplan/` und liest die Auswahl **Studiengang / Semester** aus.
-2. Der ausgewählte `option value` wird als `identifier_semester` gespeichert.
-3. `/api/schedule` baut daraus die `anzeigen/`-URL und setzt **immer** den aktuell ausgewählten `identifier_semester`.
-4. Die Termine werden aus der Tabelle gelesen und als Montag–Samstag dargestellt.
-5. Links können einzelne Fächer per Checkbox ausgeblendet werden.
+### GitHub Actions
 
-Der `term`-Wert und die Wochenliste sind im Backend zentral definiert und können bei Bedarf geändert werden.
+Nach dem Hochladen auf GitHub kann der Workflow **Build Android APK** über Actions → Run workflow gestartet werden. Die APK liegt anschließend als Artifact `hbrs-stundenplan-debug-apk` vor.
+
+## Hinweise
+
+Die App verwendet die öffentlich erreichbare H-BRS-Eva2-Seite. Falls H-BRS die HTML-Struktur oder den `term`-Wert ändert, muss der Parser bzw. die Konfiguration in `LocalApiServer.java` angepasst werden.
