@@ -67,7 +67,7 @@ const prevWeek = document.querySelector('#prevWeek');
 const todayWeek = document.querySelector('#todayWeek');
 const nextWeek = document.querySelector('#nextWeek');
 const weekTitle = document.querySelector('#weekTitle');
-
+const savePlan = document.querySelector('#savePlanBtn');
 
 /* =========================================================
    HILFSFUNKTIONEN
@@ -85,6 +85,11 @@ function esc(s) {
     }[c])
   );
 }
+
+savePlan?.addEventListener(
+  'click',
+  saveCurrentPlan
+);
 
 
 function minutes(t) {
@@ -811,46 +816,149 @@ function renderSubjects() {
 /* =========================================================
    SEMESTER LADEN
    ========================================================= */
-
-async function loadSemesters() {
+async function getSavedPlans() {
   try {
-
-    const r =
-      await fetch('/api/semesters');
-
-    const d =
-      await r.json();
+    const r = await fetch('/api/saved');
+    const d = await r.json();
 
     if (!r.ok) {
+      throw new Error(
+        d.error || 'Gespeicherte Pläne konnten nicht geladen werden.'
+      );
+    }
+
+    return Array.isArray(d.items)
+      ? d.items
+      : [];
+
+  } catch (e) {
+
+    console.error(
+      'Fehler beim Laden der gespeicherten Pläne:',
+      e
+    );
+
+    return [];
+  }
+}
+
+async function loadSemesters() {
+
+  try {
+
+    const [
+      semesterResponse,
+      savedPlans
+    ] = await Promise.all([
+      fetch('/api/semesters'),
+      getSavedPlans()
+    ]);
+
+    const d =
+      await semesterResponse.json();
+
+    if (!semesterResponse.ok) {
       throw new Error(
         d.error
       );
     }
 
-    semester.innerHTML =
+    /*
+     * -------------------------------------------------------
+     * GESPEICHERTE PLÄNE
+     * -------------------------------------------------------
+     */
+
+    const savedOptions =
+      savedPlans
+        .map(plan => `
+          <option
+            value="__saved__:${esc(plan.name)}"
+            data-saved-name="${esc(plan.name)}"
+          >
+            💾 ${esc(plan.name)}
+          </option>
+        `)
+        .join('');
+
+
+    /*
+     * -------------------------------------------------------
+     * EVA2 SEMESTER
+     * -------------------------------------------------------
+     */
+
+    const semesterOptions =
       d.items
         .map(x => `
-          <option value="${esc(x.identifier)}">
+          <option
+            value="${esc(x.identifier)}"
+          >
             ${esc(x.label)}
           </option>
         `)
         .join('');
 
+
+    /*
+     * Gespeicherte Pläne IMMER ganz oben.
+     */
+
+    semester.innerHTML =
+      savedOptions +
+      semesterOptions;
+
+
     status.textContent =
       `${d.items.length} Auswahlmöglichkeiten`;
 
-    semester.addEventListener(
-      'change',
-      loadSchedule
-    );
 
-    if (d.items.length) {
-      loadSchedule();
+    /*
+     * Change-Handler nur einmal registrieren.
+     */
+
+    if (!semester.dataset.listenerAttached) {
+
+      semester.addEventListener(
+        'change',
+        handleSemesterChange
+      );
+
+      semester.dataset.listenerAttached =
+        'true';
     }
+
+
+    /*
+     * Wenn es gespeicherte Pläne gibt,
+     * den ersten automatisch auswählen.
+     *
+     * Falls du stattdessen möchtest, dass
+     * immer das erste Eva2-Semester startet,
+     * kann man das leicht ändern.
+     */
+
+    if (savedPlans.length > 0) {
+
+      semester.selectedIndex = 0;
+
+      await loadSavedPlan(
+        savedPlans[0].name
+      );
+
+    } else if (d.items.length) {
+
+      semester.selectedIndex =
+        savedPlans.length;
+
+      await loadSchedule();
+    }
+
 
   } catch (e) {
 
-    status.textContent = 'Fehler';
+    status.textContent =
+      'Fehler';
 
     semester.innerHTML =
       '<option>Auswahl konnte nicht geladen werden</option>';
@@ -927,6 +1035,25 @@ async function loadSchedule() {
         Array.isArray(d.events) ? d.events : []
       );
 
+    if (
+      Array.isArray(d.selected_courses) &&
+      d.selected_courses.length > 0
+    ) {
+      const saved =
+        new Set(d.selected_courses);
+
+      layer.selected =
+        new Set(
+          layer.events
+            .filter(event =>
+              saved.has(
+                eventKey(event)
+              )
+            )
+            .map(eventKey)
+        );
+    }
+
     /*
      * Derselbe Studiengang darf nur einmal
      * vorhanden sein.
@@ -979,6 +1106,39 @@ async function loadSchedule() {
       'Fehler';
   }
 }
+
+async function handleSemesterChange() {
+
+  const value =
+    cleanText(semester.value);
+
+  if (!value) {
+    return;
+  }
+
+  /*
+   * Gespeicherter Stundenplan
+   */
+  if (
+    value.startsWith('__saved__:')
+  ) {
+
+    const name =
+      value.substring(
+        '__saved__:'.length
+      );
+
+    await loadSavedPlan(name);
+
+    return;
+  }
+
+  /*
+   * Normaler Eva2-Eintrag
+   */
+  await loadSchedule();
+}
+
 
 
 /* =========================================================
@@ -1640,6 +1800,439 @@ nextWeek?.addEventListener('click', () => {
 
 updateWeekTitle();
 updateWeekNavigation();
+
+
+/* =========================================================
+   Studenplan laden / speichern
+   ========================================================= */
+
+async function saveCurrentPlan() {
+
+  const defaultName =
+    'Mein Stundenplan';
+
+  const name =
+    window.prompt(
+      'Name für den Stundenplan:',
+      defaultName
+    );
+
+  if (!name || !name.trim()) {
+    return;
+  }
+
+  const semesters =
+    state.layers.map(layer => ({
+
+      identifier:
+        cleanText(layer.identifier),
+
+      label:
+        cleanText(layer.label),
+
+      fixed:
+        Boolean(layer.fixed),
+
+      selected_courses:
+        [...layer.selected]
+
+    }));
+
+
+  if (!semesters.length) {
+
+    status.textContent =
+      'Kein Studiengang geladen.';
+
+    return;
+  }
+
+
+  /*
+   * Aktuell im Dropdown ausgewähltes
+   * Semester merken.
+   *
+   * Bei einem gespeicherten Plan ist
+   * der eigentliche aktuelle Semesterwert
+   * ebenfalls relevant.
+   */
+
+  const currentSemester =
+    semester.value.startsWith(
+      '__saved__:'
+    )
+      ? ''
+      : cleanText(
+          semester.value
+        );
+
+
+  try {
+
+    status.textContent =
+      'Speichere …';
+
+
+    const r =
+      await fetch(
+        '/api/saved',
+        {
+          method: 'POST',
+
+          headers: {
+            'Content-Type':
+              'application/json'
+          },
+
+          body: JSON.stringify({
+
+            name:
+              name.trim(),
+
+            current_semester:
+              currentSemester,
+
+            semesters
+
+          })
+        }
+      );
+
+
+    const d =
+      await r.json();
+
+
+    if (!r.ok) {
+
+      throw new Error(
+        d.error ||
+        'Speichern fehlgeschlagen.'
+      );
+    }
+
+
+    status.textContent =
+      `Gespeichert: ${d.name}`;
+
+
+    /*
+     * Dropdown neu laden,
+     * damit die neue Datei sofort
+     * ganz oben erscheint.
+     */
+
+    await refreshSavedPlans(
+      d.name
+    );
+
+
+  } catch (e) {
+
+    status.textContent =
+      `Fehler: ${e.message}`;
+  }
+}
+
+async function loadSavedPlan(name) {
+
+  status.textContent =
+    `Lade "${name}" …`;
+
+  schedule.innerHTML =
+    '<div class="empty">Lade gespeicherten Stundenplan …</div>';
+
+
+  try {
+
+    const r =
+      await fetch(
+        '/api/saved/' +
+        encodeURIComponent(name)
+      );
+
+
+    const saved =
+      await r.json();
+
+
+    if (!r.ok) {
+
+      throw new Error(
+        saved.error ||
+        'Gespeicherter Plan konnte nicht geladen werden.'
+      );
+    }
+
+
+    /*
+     * Alten Zustand komplett entfernen.
+     */
+
+    state.layers = [];
+
+    state.currentLayer = null;
+
+
+    /*
+     * Jedes gespeicherte Semester
+     * wieder laden.
+     */
+
+    for (
+      const savedSemester
+      of saved.semesters || []
+    ) {
+
+      const id =
+        cleanText(
+          savedSemester.identifier
+        );
+
+      if (!id) {
+        continue;
+      }
+
+
+      const r =
+        await fetch(
+          '/api/schedule?identifier_semester=' +
+          encodeURIComponent(id) +
+          '&week=' +
+          encodeURIComponent(state.week)
+        );
+
+
+      const d =
+        await r.json();
+
+
+      if (!r.ok) {
+
+        console.error(
+          `Semester ${id} konnte nicht geladen werden`,
+          d
+        );
+
+        continue;
+      }
+
+
+      const events =
+        Array.isArray(d.all_events)
+          ? d.all_events
+          : (
+              Array.isArray(d.events)
+                ? d.events
+                : []
+            );
+
+
+      const label =
+        cleanText(
+          savedSemester.label
+        ) || id;
+
+
+      const layer =
+        newLayer(
+          label,
+          events,
+          id,
+          events
+        );
+
+
+      /*
+       * Gespeicherte Checkbox-Auswahl
+       * wiederherstellen.
+       */
+
+      const selected =
+        new Set(
+          Array.isArray(
+            savedSemester.selected_courses
+          )
+            ? savedSemester.selected_courses
+            : []
+        );
+
+
+      layer.selected =
+        new Set(
+          layer.events
+            .map(eventKey)
+            .filter(key =>
+              selected.has(key)
+            )
+        );
+
+
+      layer.fixed =
+        Boolean(
+          savedSemester.fixed
+        );
+
+
+      state.layers.push(
+        layer
+      );
+
+
+      /*
+       * Wocheninformationen übernehmen.
+       */
+
+      if (
+        Array.isArray(
+          d.available_weeks
+        )
+      ) {
+
+        state.availableWeeks =
+          d.available_weeks
+            .map(Number)
+            .filter(
+              w =>
+                Number.isInteger(w) &&
+                w >= 1 &&
+                w <= 53
+            )
+            .sort(
+              (a, b) => a - b
+            );
+      }
+    }
+
+
+    /*
+     * Gespeichertes aktuelles Semester
+     * wiederherstellen.
+     */
+
+    if (
+      saved.current_semester
+    ) {
+
+      const normalOption =
+        [...semester.options]
+          .find(
+            option =>
+              option.value ===
+              saved.current_semester
+          );
+
+
+      if (normalOption) {
+
+        semester.value =
+          saved.current_semester;
+      }
+    }
+
+
+    refreshWeekEvents();
+
+    updateWeekNavigation();
+
+    renderLayers();
+
+    renderSubjects();
+
+    render();
+
+    updateWeekTitle();
+
+
+    status.textContent =
+      `"${name}" geladen · ` +
+      `${state.layers.length} Studiengänge`;
+
+
+  } catch (e) {
+
+    console.error(e);
+
+    schedule.innerHTML =
+      `<div class="empty">
+        ${esc(e.message)}
+      </div>`;
+
+    status.textContent =
+      'Fehler';
+  }
+}
+
+async function refreshSavedPlans(
+  selectName = null
+) {
+
+  const plans =
+    await getSavedPlans();
+
+
+  /*
+   * Aktuelle normalen Eva2-Optionen
+   * behalten.
+   */
+
+  const normalOptions =
+    [...semester.options]
+      .filter(
+        option =>
+          !option.value.startsWith(
+            '__saved__:'
+          )
+      )
+      .map(option => ({
+        value:
+          option.value,
+
+        label:
+          option.textContent
+      }));
+
+
+  const savedOptions =
+    plans
+      .map(plan => `
+        <option
+          value="__saved__:${esc(plan.name)}"
+        >
+          💾 ${esc(plan.name)}
+        </option>
+      `)
+      .join('');
+
+
+  const normalHtml =
+    normalOptions
+      .map(option => `
+        <option
+          value="${esc(option.value)}"
+        >
+          ${esc(option.label)}
+        </option>
+      `)
+      .join('');
+
+
+  semester.innerHTML =
+    savedOptions +
+    normalHtml;
+
+
+  /*
+   * Neue Datei direkt auswählen.
+   */
+
+  if (selectName) {
+
+    semester.value =
+      `__saved__:${selectName}`;
+  }
+}
+
 
 /* =========================================================
    START

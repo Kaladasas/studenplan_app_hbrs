@@ -2,7 +2,11 @@ from flask import Flask, jsonify, request, send_from_directory
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+from pathlib import Path
+import json
 import re
+import threading
+import time
 
 app = Flask(__name__, static_folder='static')
 
@@ -20,6 +24,246 @@ SESSION.headers.update({
 
 # Cache pro Studiengang/Semester
 SCHEDULE_CACHE = {}
+
+# ---------------------------------------------------------
+# PERSISTENTER STUNDENPLAN-CACHE
+# ---------------------------------------------------------
+DATA_DIR = Path('data')
+SCHEDULE_FILE = DATA_DIR / 'schedules.json'
+
+# Gespeicherte Benutzer-Stundenpläne
+SAVED_DIR = Path('saved')
+
+# Verhindert Probleme beim gleichzeitigen Schreiben
+SCHEDULE_LOCK = threading.Lock()
+CACHE_REFRESH_LOCK = threading.Lock()
+CACHE_REFRESH_RUNNING = set()
+
+
+def load_schedule_cache(identifier):
+    """
+    Lädt den von Eva2 gespeicherten Stundenplan
+    für ein bestimmtes Studiengang/Semester.
+    """
+
+    if not SCHEDULE_FILE.exists():
+        return None
+
+    try:
+        with SCHEDULE_LOCK:
+            with open(
+                SCHEDULE_FILE,
+                'r',
+                encoding='utf-8'
+            ) as f:
+                schedules = json.load(f)
+
+        return schedules.get(identifier)
+
+    except (
+        json.JSONDecodeError,
+        OSError
+    ) as e:
+
+        print(
+            f'[CACHE] Fehler beim Laden: {e}'
+        )
+
+        return None
+
+
+def save_schedule_cache(
+    identifier,
+    schedule
+):
+    """
+    Speichert den von Eva2 geladenen Stundenplan
+    im technischen Cache.
+    """
+
+    DATA_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    try:
+        with SCHEDULE_LOCK:
+
+            schedules = {}
+
+            if SCHEDULE_FILE.exists():
+
+                try:
+                    with open(
+                        SCHEDULE_FILE,
+                        'r',
+                        encoding='utf-8'
+                    ) as f:
+                        schedules = json.load(f)
+
+                except json.JSONDecodeError:
+                    schedules = {}
+
+            schedules[identifier] = schedule
+
+            temp_file = (
+                SCHEDULE_FILE.with_suffix('.tmp')
+            )
+
+            with open(
+                temp_file,
+                'w',
+                encoding='utf-8'
+            ) as f:
+
+                json.dump(
+                    schedules,
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+
+            temp_file.replace(
+                SCHEDULE_FILE
+            )
+
+        return True
+
+    except OSError as e:
+
+        print(
+            f'[CACHE] Fehler beim Speichern: {e}'
+        )
+
+        return False
+
+
+def refresh_schedule_in_background(identifier):
+    """
+    Aktualisiert den Cache im Hintergrund.
+
+    Wichtig:
+    Diese Funktion blockiert den HTTP-Request nicht.
+    Wenn Eva2 nicht erreichbar ist, bleibt der alte Cache erhalten.
+    """
+
+    # Verhindert mehrere gleichzeitige Updates
+    with CACHE_REFRESH_LOCK:
+        if identifier in CACHE_REFRESH_RUNNING:
+            print(
+                f'[BACKGROUND] Update läuft bereits für {identifier}'
+            )
+            return
+
+        CACHE_REFRESH_RUNNING.add(identifier)
+
+    def worker():
+        try:
+            print(
+                f'[BACKGROUND] Starte Cache-Update für {identifier}'
+            )
+
+            try:
+                fresh_schedule = scrape_all_weeks(
+                    identifier
+                )
+
+            except Exception as e:
+                print(
+                    f'[BACKGROUND] Eva2 nicht erreichbar '
+                    f'für {identifier}: {e}'
+                )
+
+                # Alten Cache behalten
+                return
+
+            if not fresh_schedule:
+                print(
+                    f'[BACKGROUND] Keine Daten für {identifier}'
+                )
+                return
+
+            # Erst erfolgreich geladene Daten speichern
+            success = save_schedule_cache(
+                identifier,
+                fresh_schedule
+            )
+
+            if success:
+                # RAM-Cache ebenfalls aktualisieren
+                SCHEDULE_CACHE[
+                    identifier
+                ] = fresh_schedule
+
+                print(
+                    f'[BACKGROUND] Cache erfolgreich '
+                    f'aktualisiert: {identifier}'
+                )
+
+        except Exception as e:
+
+            print(
+                f'[BACKGROUND] Unerwarteter Fehler '
+                f'bei {identifier}: {e}'
+            )
+
+        finally:
+
+            with CACHE_REFRESH_LOCK:
+                CACHE_REFRESH_RUNNING.discard(
+                    identifier
+                )
+
+    thread = threading.Thread(
+        target=worker,
+        daemon=True
+    )
+
+    thread.start()
+
+
+def sanitize_saved_filename(name):
+    """
+    Macht aus einem vom Benutzer eingegebenen Namen
+    einen sicheren Dateinamen.
+    """
+
+    name = str(name or '').strip()
+
+    # Keine Pfade erlauben
+    name = Path(name).name
+
+    # .json am Ende entfernen
+    if name.lower().endswith('.json'):
+        name = name[:-5]
+
+    # Problematische Zeichen entfernen
+    name = re.sub(
+        r'[<>:"/\\|?*\x00-\x1f]',
+        '_',
+        name
+    )
+
+    # Mehrere Leerzeichen reduzieren
+    name = re.sub(
+        r'\s+',
+        ' ',
+        name
+    ).strip()
+
+    if not name:
+        return None
+
+    return name
+
+
+def saved_file_path(name):
+    safe_name = sanitize_saved_filename(name)
+
+    if not safe_name:
+        return None
+
+    return SAVED_DIR / f'{safe_name}.json'
 
 
 def get_soup(url, params=None):
@@ -615,32 +859,109 @@ def schedule():
         }), 400
 
     # ---------------------------------------------------------
-    # Cache prüfen
+    # 1. RAM-CACHE prüfen
     # ---------------------------------------------------------
-
     cached = SCHEDULE_CACHE.get(
         identifier
     )
 
-    if cached is None:
+    if cached is not None:
 
         print(
-            f'[CACHE] Kein Cache für {identifier}'
+            f'[CACHE] Verwende RAM-Cache für {identifier}'
         )
 
-        cached = scrape_all_weeks(
+        # -----------------------------------------------------
+        # Cache sofort ausliefern.
+        #
+        # Aktualisierung läuft parallel im Hintergrund.
+        # -----------------------------------------------------
+
+        refresh_schedule_in_background(
             identifier
         )
-
-        SCHEDULE_CACHE[
-            identifier
-        ] = cached
 
     else:
 
-        print(
-            f'[CACHE] Verwende Cache für {identifier}'
+        # -----------------------------------------------------
+        # 2. FESTPLATTEN-CACHE prüfen
+        # -----------------------------------------------------
+
+        cached = load_schedule_cache(
+            identifier
         )
+
+        if cached is not None:
+
+            print(
+                f'[CACHE] Verwende gespeicherten '
+                f'Stundenplan für {identifier}'
+            )
+
+            SCHEDULE_CACHE[
+                identifier
+            ] = cached
+
+            # -------------------------------------------------
+            # Auch hier sofort antworten.
+            #
+            # Eva2 wird parallel aktualisiert.
+            # -------------------------------------------------
+
+            refresh_schedule_in_background(
+                identifier
+            )
+
+        else:
+
+            # -------------------------------------------------
+            # 3. NOCH KEIN CACHE VORHANDEN
+            #
+            # Hier müssen wir einmal warten, weil wir sonst
+            # überhaupt keine Daten an das Frontend liefern
+            # können.
+            # -------------------------------------------------
+
+            print(
+                f'[CACHE] Kein gespeicherter Stundenplan '
+                f'für {identifier}'
+            )
+
+            print(
+                f'[SCRAPE] Erster Download für {identifier}'
+            )
+
+            try:
+
+                cached = scrape_all_weeks(
+                    identifier
+                )
+
+            except Exception as e:
+
+                print(
+                    f'[SCRAPE] Fehler für {identifier}: {e}'
+                )
+
+                return jsonify({
+                    'error':
+                        'Stundenplan konnte nicht geladen werden.'
+                }), 503
+
+            # -------------------------------------------------
+            # Erfolgreich speichern
+            # -------------------------------------------------
+
+            save_schedule_cache(
+                identifier,
+                cached
+            )
+
+            SCHEDULE_CACHE[
+                identifier
+            ] = cached
+
+
 
     # ---------------------------------------------------------
     # KEIN week-Filter auf dem Server!
@@ -651,7 +972,6 @@ def schedule():
     #
     # liefert ALLE Wochen.
     # ---------------------------------------------------------
-
     return jsonify({
 
         'events': cached['all_events'],
@@ -675,6 +995,152 @@ def schedule():
         'cached': True
     })
 
+
+@app.get('/api/saved')
+def list_saved_plans():
+
+    SAVED_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    files = []
+
+    for file in SAVED_DIR.glob('*.json'):
+
+        files.append({
+            'name': file.stem,
+            'filename': file.name
+        })
+
+    files.sort(
+        key=lambda x: x['name'].lower()
+    )
+
+    return jsonify({
+        'items': files
+    })
+
+@app.post('/api/saved')
+def create_saved_plan():
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    name = sanitize_saved_filename(
+        data.get('name')
+    )
+
+    if not name:
+        return jsonify({
+            'error': 'Bitte einen gültigen Namen angeben.'
+        }), 400
+
+    semesters = data.get(
+        'semesters',
+        []
+    )
+
+    current_semester = str(
+        data.get(
+            'current_semester',
+            ''
+        )
+    ).strip()
+
+    if not isinstance(
+        semesters,
+        list
+    ):
+        return jsonify({
+            'error': 'semesters muss eine Liste sein.'
+        }), 400
+
+    file = saved_file_path(name)
+
+    if file is None:
+        return jsonify({
+            'error': 'Ungültiger Dateiname.'
+        }), 400
+
+    SAVED_DIR.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    save_data = {
+        'version': 1,
+        'name': name,
+        'current_semester': current_semester,
+        'semesters': semesters
+    }
+
+    try:
+        with open(
+            file,
+            'w',
+            encoding='utf-8'
+        ) as f:
+            json.dump(
+                save_data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        print(
+            f'[SAVED] Gespeichert: {file}'
+        )
+
+        return jsonify({
+            'success': True,
+            'name': name,
+            'filename': file.name
+        })
+
+    except OSError as e:
+        print(
+            f'[SAVED] Fehler beim Speichern: {e}'
+        )
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+
+@app.get('/api/saved/<path:name>')
+def load_saved_plan(name):
+
+    file = saved_file_path(name)
+
+    if file is None or not file.exists():
+
+        return jsonify({
+            'error':
+                'Gespeicherter Stundenplan nicht gefunden.'
+        }), 404
+
+    try:
+
+        with open(
+            file,
+            'r',
+            encoding='utf-8'
+        ) as f:
+
+            data = json.load(f)
+
+        return jsonify(data)
+
+    except (
+        json.JSONDecodeError,
+        OSError
+    ) as e:
+
+        return jsonify({
+            'error':
+                f'Datei konnte nicht geladen werden: {e}'
+        }), 500
 
 if __name__ == '__main__':
 

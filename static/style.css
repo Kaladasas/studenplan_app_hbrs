@@ -97,6 +97,10 @@ select {
   margin-bottom: 7px;
 }
 
+#ReloadBtn {
+
+}
+
 /* =========================================================
    LAYERS / STUDIENGÄNGE
    ========================================================= */
@@ -621,10 +625,6 @@ main {
 .now-line {
   position: absolute;
 
-  /*
-   * Die Linie wird nicht mehr an einen einzelnen
-   * Wochentag gebunden.
-   */
   left: 0;
   right: 0;
 
